@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebGPU Life</title>
+</head>
+<body>
+  <canvas width="512" height="512"></canvas>
+  <script type="module">
+    const canvas = document.querySelector('canvas')
+
+    const GRID_SIZE = 32;
+    // navigator interface contains browser information 
+
+    if(!navigator.gpu) {
+      throw new Error("WebGPU not supported on this browser")
+    }
+
+    // adapter represents piece of GPU hardware
+
+    const adapter = await navigator.gpu.requestAdapter();
+
+    if(!adapter) {
+      throw new Error("No adaper found")
+    }
+
+    // device is main interface thru which most GPU interactions will occur
+
+    const device = await adapter.requestDevice();
+
+    // context is used to configure the canvas
+    const context = canvas.getContext("webgpu");
+    const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+    context.configure({
+      device: device,
+      format: canvasFormat
+    })
+
+    // const commandBuffer = encoder.finish();
+
+    // device.queue.submit([commandBuffer]);
+
+
+    const vertices = new Float32Array([
+      // X,   Y
+      -0.5, -0.5,    // Triangle 1 
+      0.5, -0.5,
+      0.5, 0.5,
+
+      -0.5, -0.5,    // Triangle 2
+      0.5, 0.5,
+      -0.5, 0.5,
+    ])
+
+    // need a buffer as a block of memory easily accessible to GPU
+    // since GPU cannot draw from JS array
+
+    const vertexBuffer = device.createBuffer({
+      label: "Cell vertices",
+      size: vertices.byteLength,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+    })
+
+    // uniform buffer for grid
+
+    const uniformArray = new Float32Array([GRID_SIZE, GRID_SIZE]);
+    const uniformBuffer = device.createBuffer({
+      label: "Grid Uniforms",
+      size: uniformArray.byteLength,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    // used to copy vertex data into buffer's memory, 0 is bufferOffset value
+
+    device.queue.writeBuffer(vertexBuffer, 0, vertices)
+
+    device.queue.writeBuffer(uniformBuffer, 0, uniformArray)
+
+    const vertexBufferLayout = {
+      arrayStride: 8,
+      attributes: [{
+        format: "float32x2",
+        offset: 0,
+        shaderLocation: 0,
+      }]
+    }
+
+    // SHADERS, above was the vertex data, now need to tell GPU how to process it
+    
+    // place to enter shader code
+
+    const cellShaderModule = device.createShaderModule({
+      label: "Cell shader",
+      code: // shader code here WGSL (WebGPU Shading Language)
+      // vertex shader function: calls function for every vertex in buffer, so calls 6 times
+      // to access buffer data use @location and use 'shaderLoation' attribute
+
+      // fragment shader function: invoked for every pixel being drawn, always called after vertex shader
+      // takes output of vertex and triangulates it, rasterize triangle (convert shape into pixel),
+      // then calls fragment shader for each pixel, returns a color
+
+      // let in WGSL similar to const in JS, use var to have similar use to let in JS
+
+      // instance_index built in value in WGSL
+      `
+      @group(0) @binding(0) var<uniform> grid: vec2f;
+
+      @vertex
+      fn vertexMain(@location(0) pos: vec2f,
+                    @builtin(instance_index) instance: u32) -> 
+        @builtin(position) vec4f {
+
+        let i = f32(instance);
+        let cell = vec2f(i % grid.x, floor(i / grid.x));
+        let cellOffset = cell / grid * 2;
+        let gridPos = (pos + 1) / grid - 1 + cellOffset;
+        return vec4f(gridPos,0,1);
+      }
+
+      @fragment
+      fn fragmentMain() -> @location(0) vec4f {
+        return vec4f(1,0,0,1);
+      }
+      `
+    })
+
+    const cellPipeline = device.createRenderPipeline({
+      label: "Cell pipeline",
+      layout: "auto",
+      vertex: {
+        module: cellShaderModule,
+        entryPoint: "vertexMain",
+        buffers: [vertexBufferLayout]
+      },
+      fragment: {
+        module: cellShaderModule,
+        entryPoint: "fragmentMain",
+        targets: [{
+          format: canvasFormat
+        }]
+      }
+    })
+    
+    // create bind group which connects the uniform buffer to shader
+
+    const bindGroup = device.createBindGroup({
+      label: "Cell renderer bind group",
+      layout: cellPipeline.getBindGroupLayout(0),
+      entries: [{
+        binding: 0,
+        resource: {buffer: uniformBuffer}
+      }]
+    })
+  
+    // encoder used to begind a Render Pass which is when the
+    // drawing operations in WebGPU happen
+
+    const encoder = device.createCommandEncoder();
+
+    // loadOp: clear indicates texture to be cleared when render pass starts
+    // storeOp: store indicates that once pass ends, result of drawing is saved
+
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{
+        view: context.getCurrentTexture().createView(),
+        loadOp: "clear",
+        clearValue: {r: 0, g: 0.4, b: 0, a: 1 },
+        storeOp: "store",
+      }]
+    })
+
+
+    pass.setPipeline(cellPipeline);
+    pass.setVertexBuffer(0, vertexBuffer);
+
+    pass.setBindGroup(0, bindGroup);
+
+    pass.draw(vertices.length / 2, GRID_SIZE * GRID_SIZE); // 6 vertices
+
+
+    pass.end();
+
+    device.queue.submit([encoder.finish()]);
+
+  </script>
+</body>
+</html>
