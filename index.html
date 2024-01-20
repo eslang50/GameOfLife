@@ -5,6 +5,7 @@
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>WebGPU Life</title>
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <canvas width="512" height="512"></canvas>
@@ -12,6 +13,10 @@
     const canvas = document.querySelector('canvas')
 
     const GRID_SIZE = 32;
+
+    const UPDATE_INTERVAL = 400;
+    let step = 0;
+    
     // navigator interface contains browser information 
 
     if(!navigator.gpu) {
@@ -72,6 +77,38 @@
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
+    // storage buffer - general use buffer that are read and written to compute shaders, used to store cell state
+    
+    const cellStateArray = new Uint32Array(GRID_SIZE * GRID_SIZE);
+
+    const cellStateStorage = [
+      device.createBuffer({
+        label: "Cell State A",
+        size: cellStateArray.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      }),
+      device.createBuffer({
+        label: "Cell State B",
+        size: cellStateArray.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      }),
+    
+    ]
+
+    // Mark every 3rd cell of 1st grid as active
+    for(let i = 0; i < cellStateArray.length; i+=3) {
+      cellStateArray[i] = 1;
+    }
+
+    device.queue.writeBuffer(cellStateStorage[0], 0, cellStateArray);
+
+    // Mark every other cell of 2nd grid as active
+    for(let i = 0; i < cellStateArray.length; i++) {
+      cellStateArray[i] = i % 2;
+    }
+
+    device.queue.writeBuffer(cellStateStorage[1], 0, cellStateArray);
+
     // used to copy vertex data into buffer's memory, 0 is bufferOffset value
 
     device.queue.writeBuffer(vertexBuffer, 0, vertices)
@@ -105,23 +142,42 @@
 
       // instance_index built in value in WGSL
       `
+      struct VertexInput {
+        @location(0) pos: vec2f,
+        @builtin(instance_index) instance: u32,
+      };
+
+      struct VertexOutput {
+        @builtin(position) pos: vec4f,
+        @location(0) cell: vec2f,
+      };
+
+      struct FragInput {
+        @location(0) cell: vec2f
+      }
+
       @group(0) @binding(0) var<uniform> grid: vec2f;
+      @group(0) @binding(1) var<storage> cellState: array<u32>;
 
       @vertex
-      fn vertexMain(@location(0) pos: vec2f,
-                    @builtin(instance_index) instance: u32) -> 
-        @builtin(position) vec4f {
-
-        let i = f32(instance);
+      fn vertexMain(input: VertexInput) -> VertexOutput {
+        let i = f32(input.instance);
         let cell = vec2f(i % grid.x, floor(i / grid.x));
+        let state = f32(cellState[input.instance]);
+
         let cellOffset = cell / grid * 2;
-        let gridPos = (pos + 1) / grid - 1 + cellOffset;
-        return vec4f(gridPos,0,1);
+        let gridPos = (input.pos * state + 1) / grid - 1 + cellOffset;
+
+        var output: VertexOutput;
+        output.pos = vec4f(gridPos, 0, 1);
+        output.cell = cell;
+        return output;
       }
 
       @fragment
-      fn fragmentMain() -> @location(0) vec4f {
-        return vec4f(1,0,0,1);
+      fn fragmentMain(input: FragInput) -> @location(0) vec4f {
+        let c = input.cell / grid;
+        return vec4f(1-c.x, c, 1);
       }
       `
     })
@@ -145,44 +201,71 @@
     
     // create bind group which connects the uniform buffer to shader
 
-    const bindGroup = device.createBindGroup({
-      label: "Cell renderer bind group",
+    const bindGroups = [
+      device.createBindGroup({
+      label: "Cell renderer bind group A",
       layout: cellPipeline.getBindGroupLayout(0),
-      entries: [{
-        binding: 0,
-        resource: {buffer: uniformBuffer}
-      }]
-    })
+      entries: [
+        {
+          binding: 0,
+          resource: {buffer: uniformBuffer}
+        },
+        {
+          binding: 1,
+          resource: {buffer: cellStateStorage[0]}
+        },
+      ]
+    }),
+      device.createBindGroup({
+        label: "Cell renderer bind group B",
+        layout: cellPipeline.getBindGroupLayout(0),
+        entries: [
+          {
+            binding: 0,
+            resource: {buffer: uniformBuffer}
+          },
+          {
+            binding: 1,
+            resource: {buffer: cellStateStorage[1]}
+          },
+        ]
+      })
+
+    ]
+
+    function updateGrid() {
+      step++ 
+      // encoder used to begind a Render Pass which is when the
+      // drawing operations in WebGPU happen
+
+      const encoder = device.createCommandEncoder();
+
+      // loadOp: clear indicates texture to be cleared when render pass starts
+      // storeOp: store indicates that once pass ends, result of drawing is saved
+
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [{
+          view: context.getCurrentTexture().createView(),
+          loadOp: "clear",
+          clearValue: {r: 0.5, g: 0.7 , b: 0, a: 1 },
+          storeOp: "store",
+        }]
+      })
+
+
+      pass.setPipeline(cellPipeline);
+      pass.setBindGroup(0, bindGroups[step % 2]);
+      pass.setVertexBuffer(0, vertexBuffer);
+      pass.draw(vertices.length / 2, GRID_SIZE * GRID_SIZE); // 6 vertices
+
+      // end render pass and submit comman buffer
+      pass.end();
+
+      device.queue.submit([encoder.finish()]);
+    }
+
+    setInterval(updateGrid, UPDATE_INTERVAL);
   
-    // encoder used to begind a Render Pass which is when the
-    // drawing operations in WebGPU happen
-
-    const encoder = device.createCommandEncoder();
-
-    // loadOp: clear indicates texture to be cleared when render pass starts
-    // storeOp: store indicates that once pass ends, result of drawing is saved
-
-    const pass = encoder.beginRenderPass({
-      colorAttachments: [{
-        view: context.getCurrentTexture().createView(),
-        loadOp: "clear",
-        clearValue: {r: 0, g: 0.4, b: 0, a: 1 },
-        storeOp: "store",
-      }]
-    })
-
-
-    pass.setPipeline(cellPipeline);
-    pass.setVertexBuffer(0, vertexBuffer);
-
-    pass.setBindGroup(0, bindGroup);
-
-    pass.draw(vertices.length / 2, GRID_SIZE * GRID_SIZE); // 6 vertices
-
-
-    pass.end();
-
-    device.queue.submit([encoder.finish()]);
 
   </script>
 </body>
