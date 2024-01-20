@@ -2,5 +2,6 @@
 
 Conway's game of life developed using Javascript's WebGPU API
 
-Demo ()
+Live [demo!](https://game-of-life-el.vercel.app/)
 
+![Alt text](/gameSS.png)
