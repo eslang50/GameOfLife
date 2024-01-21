@@ -10,14 +10,36 @@
 <body>
   <h1>Conway's Game of Life</h1>
   <canvas width="512" height="512"></canvas>
+  <div id="container">
+    <label>Change cell speed (ms)</label>
+    <input type="text" id="input">
+    <button>Update</button>
+  </div>
   <script type="module">
     const canvas = document.querySelector('canvas')
 
     const GRID_SIZE = 32;
-    const UPDATE_INTERVAL = 100;
-    let step = 0;
+    let UPDATE_INTERVAL = 100;
+    let step = 0;  
 
     const WORKGROUP_SIZE = 8;
+
+    const button = document.querySelector('button')
+
+    button.addEventListener('click', () => {
+      const inputElement = document.getElementById('input');
+      const interval = parseInt(inputElement.value);
+      UPDATE_INTERVAL = interval;
+      step = 0;
+      for (let i = 0; i < cellStateArray.length; ++i) {
+        cellStateArray[i] = Math.random() > 0.6 ? 1 : 0;
+      }
+
+      // Write the new state to the GPU buffer
+      device.queue.writeBuffer(cellStateStorage[0], 0, cellStateArray);
+
+      setInterval(updateGrid, UPDATE_INTERVAL);
+    })
 
     // navigator interface contains browser information 
 
